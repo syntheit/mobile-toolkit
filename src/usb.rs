@@ -72,7 +72,12 @@ impl Usb {
         })
     }
 
+    /// Bulk OUT; an empty `data` sends a zero-length packet.
     pub fn write(&mut self, data: &[u8], timeout: Duration) -> Result<()> {
+        if data.is_empty() {
+            let c = self.out.transfer_blocking(Buffer::new(0), timeout);
+            return c.status.map_err(|e| anyhow!("USB zero-length write failed: {e}"));
+        }
         for chunk in data.chunks(OUT_CHUNK) {
             let c = self.out.transfer_blocking(Buffer::from(chunk), timeout);
             match c.status {

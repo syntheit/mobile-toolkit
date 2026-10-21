@@ -1,11 +1,12 @@
-//! Firehose: the XML protocol spoken by the uploaded loader. READ-ONLY in this
-//! phase: configure, read, getstorageinfo, power, nop. Framing ported from
-//! bkerler/edl `firehose.py` (GPL-3.0).
+//! Firehose: the XML protocol spoken by the uploaded loader: configure, read,
+//! program, getstorageinfo, setbootablestoragedrive, power, nop. Framing ported
+//! from bkerler/edl `firehose.py` (GPL-3.0). Callers write through `write.rs`.
 
 use crate::usb::Transport;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
+use std::io::Read;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -227,6 +228,54 @@ impl<T: Transport> Firehose<T> {
         Ok(v)
     }
 
+    /// Write `len` bytes from `src` to `lun` at `start`, like edl `cmd_program`:
+    /// `<program>`, ACK, then the raw data in max-payload transfers each
+    /// followed by a ZLP (the final partial sector zero-padded), then a closing
+    /// ACK. `sent` sees every byte put on the wire, padding included.
+    pub fn program(
+        &mut self,
+        lun: u8,
+        start: u64,
+        len: u64,
+        src: &mut dyn Read,
+        sent: &mut dyn FnMut(&[u8]),
+    ) -> Result<()> {
+        let ss = self.sector_size;
+        let n = len.div_ceil(ss as u64);
+        self.command(
+            &format!(
+                "<program SECTOR_SIZE_IN_BYTES=\"{ss}\" num_partition_sectors=\"{n}\" \
+                 physical_partition_number=\"{lun}\" start_sector=\"{start}\"/>"
+            ),
+            TIMEOUT,
+        )?;
+        let chunk = (self.max_payload / ss).max(1) * ss;
+        let mut buf = vec![0u8; chunk];
+        let (total, mut done) = (n * ss as u64, 0u64);
+        while done < total {
+            let c = (total - done).min(chunk as u64) as usize;
+            let data = len.saturating_sub(done).min(c as u64) as usize;
+            src.read_exact(&mut buf[..data])
+                .with_context(|| format!("reading source at byte {done} (device left mid-write)"))?;
+            buf[data..c].fill(0);
+            self.t.write(&buf[..c], TIMEOUT)?;
+            self.t.write(&[], TIMEOUT)?;
+            sent(&buf[..c]);
+            done += c as u64;
+        }
+        let r = self.reply(Duration::from_secs(60))?;
+        if !r.ack {
+            bail!("program of LUN {lun} sectors {start}+{n} failed{}", fmt_logs(&r.logs));
+        }
+        Ok(())
+    }
+
+    /// Select the UFS boot LUN (bBootLunEn): 1 = boot LU A, 2 = boot LU B.
+    pub fn set_bootable(&mut self, lun: u8) -> Result<()> {
+        self.command(&format!("<setbootablestoragedrive value=\"{lun}\" />"), TIMEOUT)
+            .map(|_| ())
+    }
+
     /// `reset` or `off`.
     pub fn power(&mut self, mode: &str) -> Result<()> {
         self.command(&format!("<power value=\"{mode}\"/>"), TIMEOUT).map(|_| ())
@@ -288,6 +337,62 @@ mod tests {
         )]);
         let e = Firehose::new(m, vec![], 4096).read_vec(0, 1 << 40, 1).unwrap_err();
         assert!(e.to_string().contains("ERROR: out of range"), "{e}");
+    }
+
+    fn program(m: Mock, payload: usize, data: &[u8]) -> (Result<()>, Vec<u8>, Mock) {
+        let mut fh = Firehose::new(m, vec![], 4096);
+        fh.max_payload = payload;
+        let mut sent = Vec::new();
+        let r = fh.program(4, 100, data.len() as u64, &mut &data[..], &mut |d| {
+            sent.extend_from_slice(d)
+        });
+        (r, sent, fh.t)
+    }
+
+    #[test]
+    fn program_framing_and_padding() {
+        // 2.5 sectors with an 8 KiB payload: command, ACK, 8 KiB + ZLP,
+        // 4 KiB (half zero-padded) + ZLP, closing ACK.
+        let data: Vec<u8> = (0..10240u32).map(|i| (i % 251) as u8 + 1).collect();
+        let m = Mock::new(vec![
+            doc("<response value=\"ACK\" rawmode=\"true\" />"),
+            doc("<response value=\"ACK\" rawmode=\"false\" />"),
+        ]);
+        let (r, sent, m) = program(m, 8192, &data);
+        r.unwrap();
+        let cmd = String::from_utf8(m.writes[0].clone()).unwrap();
+        assert!(cmd.contains(
+            "<program SECTOR_SIZE_IN_BYTES=\"4096\" num_partition_sectors=\"3\" \
+             physical_partition_number=\"4\" start_sector=\"100\"/>"
+        ));
+        let lens: Vec<usize> = m.writes[1..].iter().map(Vec::len).collect();
+        assert_eq!(lens, [8192, 0, 4096, 0]);
+        assert_eq!(&m.writes[1][..], &data[..8192]);
+        assert_eq!(&m.writes[3][..2048], &data[8192..]);
+        assert!(m.writes[3][2048..].iter().all(|&b| b == 0));
+        assert_eq!(sent.len(), 3 * 4096);
+        assert_eq!(&sent[..], &[&m.writes[1][..], &m.writes[3][..]].concat()[..]);
+    }
+
+    #[test]
+    fn program_nak() {
+        // NAK on the command: no data phase at all.
+        let m = Mock::new(vec![doc(
+            "<log value=\"ERROR: write protect\" /><response value=\"NAK\" />",
+        )]);
+        let (r, sent, m) = program(m, 1 << 20, &[1; 4096]);
+        assert!(r.unwrap_err().to_string().contains("write protect"));
+        assert!(sent.is_empty() && m.writes.len() == 1);
+        // NAK after the data phase.
+        let m = Mock::new(vec![
+            doc("<response value=\"ACK\" rawmode=\"true\" />"),
+            doc("<log value=\"ERROR: failed to write\" /><response value=\"NAK\" rawmode=\"false\" />"),
+        ]);
+        let e = program(m, 1 << 20, &[1; 4096]).0.unwrap_err().to_string();
+        assert!(
+            e.contains("program of LUN 4 sectors 100+1 failed") && e.contains("failed to write"),
+            "{e}"
+        );
     }
 
     #[test]
