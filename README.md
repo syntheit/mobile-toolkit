@@ -186,7 +186,18 @@ The user needs access to `05c6:9008`, for example with a udev rule:
 SUBSYSTEM=="usb", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9008", MODE="0660", TAG+="uaccess"
 ```
 
-(A NixOS module will set this up later.)
+On NixOS, the flake's module does this. It installs mtk, gives a group
+(default `plugdev`, created if needed) access to `05c6:9008` and to fastboot
+(`18d1`), and blacklists `qcserial`, which would otherwise bind the EDL device
+as `/dev/ttyUSB*`:
+
+```nix
+inputs.mobile-toolkit.url = "github:syntheit/mobile-toolkit";
+# in nixosSystem { modules = [ ... ]; }:
+mobile-toolkit.nixosModules.default
+{ programs.mtk.enable = true; users.users.alice.extraGroups = [ "plugdev" ]; }
+# options: programs.mtk.group = "plugdev"; programs.mtk.blacklistQcserial = true;
+```
 
 ## Building
 

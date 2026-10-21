@@ -30,7 +30,40 @@
         };
       });
 
-      # TODO: nixosModules.default — udev rule for 05c6:9008 (plugdev/uaccess)
-      # and the package on PATH. Not built yet.
+      nixosModules.default = { config, lib, pkgs, ... }:
+        let cfg = config.programs.mtk;
+        in {
+          options.programs.mtk = {
+            enable = lib.mkEnableOption "mtk, the Qualcomm EDL recovery tool";
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+              defaultText = lib.literalExpression "mobile-toolkit.packages.\${system}.default";
+              description = "The mtk package to install.";
+            };
+            group = lib.mkOption {
+              type = lib.types.str;
+              default = "plugdev";
+              description = "Group whose members may open EDL (05c6:9008) and fastboot (18d1) USB devices.";
+            };
+            blacklistQcserial = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = ''
+                Blacklist the qcserial kernel module, which otherwise binds the EDL
+                device as /dev/ttyUSB* (where ModemManager may probe it).
+              '';
+            };
+          };
+          config = lib.mkIf cfg.enable {
+            environment.systemPackages = [ cfg.package ];
+            users.groups.${cfg.group} = { };
+            services.udev.extraRules = ''
+              SUBSYSTEM=="usb", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9008", MODE="0660", GROUP="${cfg.group}", TAG+="uaccess"
+              SUBSYSTEM=="usb", ATTRS{idVendor}=="18d1", MODE="0660", GROUP="${cfg.group}", TAG+="uaccess"
+            '';
+            boot.blacklistedKernelModules = lib.mkIf cfg.blacklistQcserial [ "qcserial" ];
+          };
+        };
     };
 }
