@@ -1,0 +1,48 @@
+# OnePlus 6T "fajita" (SDM845, UFS)
+name = "OnePlus 6T (fajita)"
+
+[usb]
+edl_vid = 0x05c6
+edl_pid = 0x9008
+fastboot_vid = 0x18d1
+
+[storage]
+memory = "ufs"
+sector_size = 4096
+luns = 6
+
+[loader]
+# From bkerler/edl: Loaders/oneplus/ (not redistributed here)
+file = "0008b0e10051459b_dd7c5f2e53176bee_fhprg_op6t.bin"
+sha256 = "fbaa5b48e29b232fd7d4bb8e4ff64933efbbd8d3be67e084cb14611cae519043"
+hwid = "0008b0e10051459b"
+pkhash_prefix = "dd7c5f2e53176bee"
+
+[partitions]
+# Never written by mtk (enforced from phase 2 on)
+protected = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+
+[oem]
+# OnePlus: byte in `config` that holds the OEM-unlock-allowed flag
+unlock_flag_partition = "config"
+unlock_flag_offset = 4095
+
+# Pre-deploy known-good slot-a hashes (mtk status --verify)
+[known_good]
+abl_a = "3b1f915a5e3690aeb89fd0d968c76ac750547fdb1769ce0b255ec70a3ac25f4e"
+aop_a = "0a0dff0e9ca738b026f492a7a5c0f5483f3dbc8f72bfd329f418e1aba9c00f2f"
+bluetooth_a = "23cbef15eb4ada1f5e7aaa12ab3067ee1124fd2217b400291ab98bc32ef41f3f"
+cmnlib64_a = "cfc5ce85f0878fdf41f5e2e46a43ba32036d913b22560a32d47415328034091a"
+cmnlib_a = "5d4ce32417a20a9643181e3f959503374726dc503b94295212c5ecfd64e6878a"
+devcfg_a = "9d24b56510945d34199d83d3866a69790407ee8376f8c4635b0f38a12cb915fc"
+dsp_a = "808b4fb461c79d7a54af07f1a0176fd1fce4d547a3f90fab2dee4add2ec66a65"
+dtbo_a = "2daeb1f36095b44b318410b3f4e8b5d989dcc7bb023d1426c492dab0a3053e74"
+hyp_a = "80b6d458454de6fd7fe58554a902dd6fa6f5faf4a10c1c6686e5a5f4ceb2e587"
+keymaster_a = "f91107ecc42220937f689eca96a11a3626ddbb1bd458966f4985077ea82511c8"
+qupfw_a = "38334db058e636255cd23031d10fad5600d7c994e5617eb63afb963a2b6f0e38"
+storsec_a = "9d556d516a9aeaca8e54c7b0b27d8d5c99c642acf17a057bf790f0b836cc56fa"
+tz_a = "363bc111e891edc35e4248a7e596737607a4bf8fef17e30ddb45b1d687c653e9"
+vbmeta_a = "7e4d30b7a86708b431c60c0f52ce8de2d15ea2d03e4855078c084257b73fcb74"
+xbl_a = "827f6282247e418ede4d4454453f9034aaf93b469cbc97feff98f006cb1c092b"
+xbl_config_a = "3c9f55dd7d30e5b6f59d4fbbeabcbf836cdd1c41968306bc2e1f88d39d9beb8e"
+boot_a = "a185277297921222af414bb9a067070e408f1a39adfd8714df492030d22a3b27"

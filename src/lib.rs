@@ -2,3 +2,4 @@
 
 pub mod devinfo;
 pub mod gpt;
+pub mod profile;
