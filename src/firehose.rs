@@ -290,6 +290,26 @@ impl<T: Transport> Firehose<T> {
     }
 }
 
+/// Product name and LU count from `getstorageinfo` log lines such as
+/// `UFS Inquiry Command Output: SAMSUNG KLUEG8U1EA-B0C1` and
+/// `UFS Total Active LU: 0x6` (`:` or `=`, with or without `INFO: `).
+pub fn storage_summary(logs: &[String]) -> (Option<String>, Option<u64>) {
+    let get = |key: &str| {
+        logs.iter().find_map(|l| {
+            let l = l.trim();
+            let v = l.strip_prefix("INFO:").unwrap_or(l).trim_start().strip_prefix(key)?;
+            let v = v.trim_start().strip_prefix([':', '='])?;
+            Some(v.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+    };
+    let num = |v: String| match v.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16).ok(),
+        None => v.parse().ok(),
+    };
+    let product = get("UFS Inquiry Command Output").filter(|v| !v.is_empty());
+    (product, get("UFS Total Active LU").and_then(num))
+}
+
 fn fmt_logs(logs: &[String]) -> String {
     logs.iter().map(|l| format!("\n  {l}")).collect()
 }
@@ -420,6 +440,23 @@ mod tests {
             [b"<?xml version=\"1.0\" ?><data><power value=\"reset\"/></data>".to_vec()]
         );
         assert_eq!(fh.t.reads.len(), 1);
+    }
+
+    #[test]
+    fn storage_summary_parses_ufs_lines() {
+        let logs: Vec<String> = [
+            "UFS fInitialized: 0x1",
+            "UFS Inquiry Command Output: SAMSUNG  KLUEG8U1EA-B0C1 ",
+            "INFO: UFS Total Active LU: 0x6",
+        ]
+        .map(Into::into)
+        .into();
+        assert_eq!(
+            storage_summary(&logs),
+            (Some("SAMSUNG KLUEG8U1EA-B0C1".into()), Some(6))
+        );
+        assert_eq!(storage_summary(&["UFS Total Active LU=4".into()]), (None, Some(4)));
+        assert_eq!(storage_summary(&[]), (None, None));
     }
 
     #[test]

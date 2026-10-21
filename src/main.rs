@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use mobile_toolkit::firehose::Firehose;
+use mobile_toolkit::firehose::{Firehose, storage_summary};
 use mobile_toolkit::gpt::{self, Ab, Entry, LunGpt, OP_INACTIVE_TYPE};
 use mobile_toolkit::image::{Image, hex};
 use mobile_toolkit::profile::{Profile, chown_to_user, data_dir};
@@ -33,6 +33,9 @@ enum Cmd {
         /// Also hash slot-a firmware and compare to the profile's known-good list
         #[arg(long)]
         verify: bool,
+        /// Print the raw getstorageinfo report
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Dump a partition to a file
     Read {
@@ -156,7 +159,7 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, p: &Profile) -> Result<ExitCode> {
     match &cli.cmd {
-        Cmd::Status { verify } => status(p, cli.loader.as_deref(), *verify),
+        Cmd::Status { verify, verbose } => status(p, cli.loader.as_deref(), *verify, *verbose),
         Cmd::Read { partition, out, lun } => {
             let mut fh = connect(p, cli.loader.as_deref())?;
             read_partition(&mut fh, p, partition, out, *lun)?;
@@ -446,7 +449,7 @@ fn read_partition(fh: &mut Fh, p: &Profile, name: &str, out: &Path, lun: Option<
     Ok(())
 }
 
-fn status(p: &Profile, loader: Option<&Path>, verify: bool) -> Result<ExitCode> {
+fn status(p: &Profile, loader: Option<&Path>, verify: bool, verbose: bool) -> Result<ExitCode> {
     println!("device   {}", p.name);
     let mode = usb::detect((p.edl_vid, p.edl_pid), p.fastboot_vid)?;
     println!("usb      {}", describe(&mode, p));
@@ -460,8 +463,20 @@ fn status(p: &Profile, loader: Option<&Path>, verify: bool) -> Result<ExitCode> 
 
     match fh.storage_info(0) {
         Ok(r) => {
-            for l in r.logs.iter().filter(|l| !l.trim().is_empty()) {
-                println!("storage  {}", l.trim());
+            let lines: Vec<&str> = r.logs.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+            let (product, luns) = storage_summary(&r.logs);
+            let mut line = p.memory.to_uppercase();
+            if let Some(x) = &product {
+                line += &format!(" {x}");
+            }
+            match luns {
+                Some(n) => line += &format!(", {n} LUNs"),
+                None if product.is_none() => line += &format!(", {} report lines (-v)", lines.len()),
+                None => {}
+            }
+            println!("storage  {line}");
+            if verbose {
+                lines.iter().for_each(|l| println!("         {l}"));
             }
         }
         Err(e) => println!("storage  getstorageinfo failed: {e:#}"),

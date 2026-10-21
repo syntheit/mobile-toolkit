@@ -13,7 +13,7 @@ First target: OnePlus 6T "fajita" (SDM845, UFS, 6 LUNs).
 ## Commands
 
 ```
-mtk status [--verify]            # mode, GPT health per LUN, A/B slots, lock state
+mtk status [--verify] [-v]       # mode, storage, GPT health per LUN, A/B slots, lock state
 mtk gpt [--lun N]                # print partition tables
 mtk read <partition> <out> [--lun N]
 mtk reset [--off]                # leave EDL, then wait until the device is gone
