@@ -7,8 +7,8 @@ bkerler/edl and OnePlus MSMDownloadTool for this job. It uses pure-Rust USB
 
 First target: OnePlus 6T "fajita" (SDM845, UFS, 6 LUNs).
 
-**Status: phase 1, read-only.** mtk uploads the firehose loader, then reads.
-It has no write, program, erase or patch code.
+**Status:** phase 1 (read-only) is validated on the device. Phase 2
+(writes) and phase 3 (`install-nixos`) are tested offline only so far.
 
 ## Commands
 
@@ -17,6 +17,11 @@ mtk status [--verify]            # mode, GPT health per LUN, A/B slots, lock sta
 mtk gpt [--lun N]                # print partition tables
 mtk read <partition> <out> [--lun N]
 mtk reset [--off]                # leave EDL (firehose power command)
+
+mtk flash <partition> <image> [--lun N]   # raw or Android sparse image
+mtk slot a|b [--bootlun]                  # set the active A/B slot
+mtk unlock [--relock]                     # devinfo + config unlock bytes
+mtk install-nixos <dir> [--slot a|b]      # mobile-nixos fastboot images
 ```
 
 Global options: `--device <name|file.toml>` (default `fajita`) and
@@ -34,6 +39,80 @@ Global options: `--device <name|file.toml>` (default `fajita`) and
   OnePlus OEM-unlock-allowed byte in `config`.
 - **`--verify`:** hashes the slot-a firmware and compares it to the profile's
   known-good SHA-256 list.
+
+## Writes
+
+Every write command goes through one safety layer (`src/write.rs`):
+
+- **Dry run by default.** mtk connects, reads the GPT and prints exactly what
+  it would write: partition, LUN, start sector, sector count, bytes and the
+  source SHA-256. Then it exits 0. Add `--yes` to write.
+- **Protected partitions** from the profile (`modemst1`, `modemst2`, `fsg`,
+  `fsc`, `persist`) are refused unless `--force-protected` is given.
+- **Oversize images** are refused. For a sparse image the expanded size counts.
+- **Backup first.** Before any write, every target region is read into
+  `$MTK_DATA/backups/<UTC timestamp>/<partition>.img`, with `SHA256SUMS` and
+  `LOCATIONS` (LUN, sector, count) next to it. `userdata` (about 245 GB) is
+  backed up as its first and last MiB only (`userdata.head.img`,
+  `userdata.tail.img`) unless `--full-backup` is given. `--no-backup` skips
+  the backup.
+- **Read-back.** After writing, mtk reads every written range back and
+  compares its SHA-256 with what it sent. A mismatch is a hard error.
+
+Images stream from disk in max-payload chunks, so multi-GB files are never
+loaded into memory. Android sparse images (`img2simg` output) are expanded on
+the fly. `DONT_CARE` chunks are skipped, as fastboot does, so those sectors
+keep their old contents.
+
+The edl OP6T loader needs no OnePlus auth for writes
+(see `docs/oneplus-auth.md`).
+
+### `mtk slot a|b`
+
+The target table is computed from the current one; mtk never blindly swaps
+anything. So running it twice changes nothing, and an interrupted run can
+simply be repeated.
+
+- `boot_<target>` gets `0x6f` (priority 3, active, retry 5, successful: the
+  value of a healthy booted slot). `boot_<other>` gets `0x3a` (priority 2,
+  retry 7, not active).
+- Every other `_a`/`_b` pair gets the active bit set on the target half and
+  cleared on the other half. The rest of the attribute byte is kept, which is
+  what abl does.
+- OnePlus type GUIDs: in a pair where exactly one half has the inactive type
+  `77036cd4-03d5-42bb-8ed1-37e5a88baa34`, the target half gets the real type
+  and the other half gets the inactive one. Pairs where both halves have the
+  real type (`xbl`, `xbl_config` on LUN1/LUN2) keep their types. If both
+  halves have the inactive type, mtk refuses.
+- Per LUN the write order is: backup entries, backup header, then primary
+  header and entries. At every point at least one copy has valid CRCs. If the
+  primary entries fail their CRC, the LUN is rebuilt from the backup copy.
+  mtk refuses a LUN whose header CRCs are bad.
+- After writing, mtk re-reads all GPTs and checks CRCs, primary == backup,
+  and the boot slot.
+- The UFS boot LUN (`bBootLunEn`, which picks `xbl_a` on LUN1 or `xbl_b` on
+  LUN2) is separate and is **not** changed unless `--bootlun` is given.
+  `--bootlun` sends firehose `setbootablestoragedrive` with 1 for a, 2 for b.
+
+This avoids the edl `setactiveslot` bugs: it stopping after the first `_a`
+partition, the unconditional type swap, and reading past the end of a LUN.
+
+### `mtk unlock`
+
+This sets devinfo `is_unlocked` (byte `0x0d`) and the OEM-unlock-allowed flag
+in `config` to 1. It does a read-modify-write of just those two sectors.
+The `config` flag is the **last byte** of the 512 KiB partition (sector 127,
+offset 4095), as in Android's PersistentDataBlock. edl `oemunlock` patches
+offset `0x7FFFF` too, but prints the partition start ("sector 85696, offset
+4095"). If both bytes are already set, mtk does nothing. `--relock` writes 0s.
+
+### `mtk install-nixos <dir>`
+
+`<dir>` is the `mobile.outputs.android.android-fastboot-images` output of
+mobile-nixos, which holds `boot.img` and `system.img` (sparse on sdm845).
+`boot.img` goes to `boot_<slot>`, where the slot defaults to the current boot
+slot. `system.img` goes to `userdata`. Afterwards mtk prints the next steps
+(`mtk slot <s> --yes` if the slot changed, then `mtk reset`).
 
 ## Loader
 
@@ -65,7 +144,7 @@ SUBSYSTEM=="usb", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9008", MODE="0660"
 ```
 nix build              # or: nix develop -c cargo build --release
 nix develop -c cargo test
-MTK_REAL_DUMPS=/path/to/dumps nix develop -c cargo test -- --ignored   # parses real GPT dumps
+MTK_REAL_DUMPS=/path/to/dumps nix develop -c cargo test -- --ignored   # real GPT dumps, incl. slot round-trips
 ```
 
 ## Credits

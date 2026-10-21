@@ -19,7 +19,7 @@ hwid = "0008b0e10051459b"
 pkhash_prefix = "dd7c5f2e53176bee"
 
 [partitions]
-# Never written by mtk (enforced from phase 2 on)
+# Every write refuses these unless --force-protected
 protected = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
 
 [oem]

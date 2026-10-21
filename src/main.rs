@@ -1,16 +1,18 @@
-use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result, bail, ensure};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use mobile_toolkit::firehose::Firehose;
-use mobile_toolkit::gpt::{self, Entry, LunGpt, OP_INACTIVE_TYPE};
+use mobile_toolkit::gpt::{self, Ab, Entry, LunGpt, OP_INACTIVE_TYPE};
+use mobile_toolkit::image::{Image, hex};
 use mobile_toolkit::profile::{Profile, data_dir};
 use mobile_toolkit::usb::{self, Mode, Usb};
-use mobile_toolkit::{devinfo, sahara};
+use mobile_toolkit::write::{self, Opts, Region, size};
+use mobile_toolkit::{devinfo, sahara, slot};
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Qualcomm EDL recovery toolkit (read-only phase).
+/// Qualcomm EDL recovery toolkit.
 #[derive(Parser)]
 #[command(name = "mtk", version)]
 struct Cli {
@@ -49,6 +51,83 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
+    /// Write a raw or Android sparse image to a partition
+    Flash {
+        partition: String,
+        image: PathBuf,
+        #[arg(long)]
+        lun: Option<u8>,
+        #[command(flatten)]
+        w: WriteFlags,
+    },
+    /// Make slot a or b active on every A/B pair (GPT attributes + OnePlus type GUIDs)
+    Slot {
+        slot: SlotArg,
+        /// Also point the UFS boot LUN at xbl_<slot> (setbootablestoragedrive)
+        #[arg(long)]
+        bootlun: bool,
+        #[command(flatten)]
+        w: WriteFlags,
+    },
+    /// Set the bootloader-unlocked bytes (devinfo is_unlocked, config OEM-unlock flag)
+    Unlock {
+        /// Clear them instead
+        #[arg(long)]
+        relock: bool,
+        #[command(flatten)]
+        w: WriteFlags,
+    },
+    /// Flash mobile-nixos android-fastboot-images: boot.img -> boot_<slot>, system.img -> userdata
+    InstallNixos {
+        dir: PathBuf,
+        /// Default: the current boot slot
+        #[arg(long)]
+        slot: Option<SlotArg>,
+        #[command(flatten)]
+        w: WriteFlags,
+    },
+}
+
+#[derive(Args, Clone, Copy)]
+struct WriteFlags {
+    /// Write for real (default: dry run that prints what would be written)
+    #[arg(long)]
+    yes: bool,
+    /// Allow writing partitions the profile marks protected
+    #[arg(long)]
+    force_protected: bool,
+    /// Skip the backup of the target region
+    #[arg(long)]
+    no_backup: bool,
+    /// Back up all of userdata, not only its first and last MiB
+    #[arg(long)]
+    full_backup: bool,
+}
+
+impl From<WriteFlags> for Opts {
+    fn from(w: WriteFlags) -> Opts {
+        Opts {
+            yes: w.yes,
+            force_protected: w.force_protected,
+            no_backup: w.no_backup,
+            full_backup: w.full_backup,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SlotArg {
+    A,
+    B,
+}
+
+impl SlotArg {
+    fn c(self) -> char {
+        match self {
+            SlotArg::A => 'a',
+            SlotArg::B => 'b',
+        }
+    }
 }
 
 type Fh = Firehose<Usb>;
@@ -86,11 +165,37 @@ fn run(cli: &Cli, p: &Profile) -> Result<ExitCode> {
             println!("sent power {}", if *off { "off" } else { "reset" });
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Flash {
+            partition,
+            image,
+            lun,
+            w,
+        } => {
+            let img = Image::open(image)?;
+            let mut fh = connect(p, cli.loader.as_deref())?;
+            let (lun, e) = find_part(&mut fh, p, partition, *lun)?;
+            let target = write::Write {
+                region: region(lun, &e),
+                image: img,
+            };
+            write::run(&mut fh, &p.protected, &[target], (*w).into(), &backups())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Slot { slot, bootlun, w } => {
+            let mut fh = connect(p, cli.loader.as_deref())?;
+            set_slot(&mut fh, p, slot.c(), *bootlun, (*w).into())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Unlock { relock, w } => {
+            let mut fh = connect(p, cli.loader.as_deref())?;
+            unlock(&mut fh, p, *relock, (*w).into())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::InstallNixos { dir, slot, w } => {
+            install_nixos(p, cli.loader.as_deref(), dir, slot.map(SlotArg::c), (*w).into())?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn load_loader(p: &Profile, over: Option<&Path>) -> Result<(PathBuf, Vec<u8>)> {
@@ -182,16 +287,6 @@ fn lun_gpt(fh: &mut Fh, lun: u8) -> Result<LunGpt> {
     gpt::read_lun(&mut |lba, n| fh.read_vec(lun, lba, n), ss).with_context(|| format!("LUN {lun} GPT"))
 }
 
-fn size(bytes: u64) -> String {
-    let units = ["B", "K", "M", "G", "T"];
-    let (mut v, mut i) = (bytes as f64, 0);
-    while v >= 1024.0 && i < units.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    format!("{v:.1}{}", units[i])
-}
-
 fn print_gpt(lun: u8, g: &LunGpt, p: &Profile) {
     let h = &g.primary.header;
     println!(
@@ -236,11 +331,15 @@ fn flag_offset(e: &Entry, ss: u64, off: i64) -> u64 {
 /// Look a partition up by name, across all LUNs unless one is given.
 fn find_part(fh: &mut Fh, p: &Profile, name: &str, lun: Option<u8>) -> Result<(u8, Entry)> {
     let luns: Vec<u8> = lun.map_or_else(|| (0..p.luns).collect(), |l| vec![l]);
-    let mut hits = Vec::new();
+    let mut parts = Vec::new();
     for l in luns {
-        let g = lun_gpt(fh, l)?;
-        hits.extend(g.entries.into_iter().filter(|e| e.name == name).map(|e| (l, e)));
+        parts.extend(lun_gpt(fh, l)?.entries.into_iter().map(|e| (l, e)));
     }
+    find_in(&parts, name)
+}
+
+fn find_in(parts: &[(u8, Entry)], name: &str) -> Result<(u8, Entry)> {
+    let mut hits: Vec<(u8, Entry)> = parts.iter().filter(|(_, e)| e.name == name).cloned().collect();
     match hits.len() {
         0 => bail!("partition `{name}` not found"),
         1 => Ok(hits.remove(0)),
@@ -430,4 +529,196 @@ fn status(p: &Profile, loader: Option<&Path>, verify: bool) -> Result<ExitCode> 
     } else {
         ExitCode::FAILURE
     })
+}
+
+fn backups() -> PathBuf {
+    data_dir().join("backups")
+}
+
+fn region(lun: u8, e: &Entry) -> Region {
+    Region {
+        name: e.name.clone(),
+        lun,
+        start: e.first_lba,
+        sectors: e.sectors(),
+    }
+}
+
+fn all_gpts(fh: &mut Fh, p: &Profile) -> Result<Vec<(u8, LunGpt)>> {
+    (0..p.luns).map(|l| Ok((l, lun_gpt(fh, l)?))).collect()
+}
+
+fn parts_of(gpts: &[(u8, LunGpt)]) -> Vec<(u8, Entry)> {
+    gpts.iter()
+        .flat_map(|(l, g)| g.entries.iter().map(|e| (*l, e.clone())))
+        .collect()
+}
+
+fn boot_slot_of(parts: &[(u8, Entry)]) -> Result<char> {
+    let refs: Vec<(u8, &Entry)> = parts.iter().map(|(l, e)| (*l, e)).collect();
+    gpt::boot_slot(&gpt::pairs(&refs))
+}
+
+fn set_slot(fh: &mut Fh, p: &Profile, s: char, bootlun: bool, o: Opts) -> Result<()> {
+    let ss = p.sector_size;
+    let plans = slot::plan(&all_gpts(fh, p)?, s, ss)?;
+    for l in &plans {
+        if let Some(n) = &l.note {
+            println!("slot     LUN{} note: {n}", l.lun);
+        }
+        if !l.changes.is_empty() {
+            println!("slot     LUN{}: {} entries change", l.lun, l.changes.len());
+        }
+        for c in &l.changes {
+            let ty = |t: u32| {
+                if t == OP_INACTIVE_TYPE {
+                    format!("~{t:08x}")
+                } else {
+                    format!(" {t:08x}")
+                }
+            };
+            println!(
+                "  {:<14} {:<17}{}  ->  {:<17}{}",
+                c.name,
+                Ab(c.old.0).to_string(),
+                ty(c.old.1),
+                Ab(c.new.0).to_string(),
+                ty(c.new.1)
+            );
+        }
+    }
+    let writes: Vec<write::Write> = plans
+        .iter()
+        .flat_map(|l| {
+            l.writes.iter().map(|(name, lba, data)| write::Write {
+                region: Region {
+                    name: name.clone(),
+                    lun: l.lun,
+                    start: *lba,
+                    sectors: (data.len() / ss) as u64,
+                },
+                image: Image::bytes(name, 0, data.clone()),
+            })
+        })
+        .collect();
+    let boot_lun = if s == 'a' { 1 } else { 2 };
+    if !bootlun {
+        println!(
+            "note     UFS boot LUN (bBootLunEn) is separate and NOT changed: it alone picks xbl \
+             from LUN1 (xbl_a) or LUN2 (xbl_b); --bootlun sets it to {boot_lun}"
+        );
+    }
+    if writes.is_empty() {
+        println!("slot     _{s} already active on every A/B pair; GPT unchanged");
+    } else if write::run(fh, &p.protected, &writes, o, &backups())? {
+        let after = all_gpts(fh, p)?;
+        for ((l, g), plan) in after.iter().zip(&plans) {
+            ensure!(g.issues.is_empty(), "LUN{l} GPT after writing: {:?}", g.issues);
+            ensure!(
+                g.primary.raw_entries == plan.entries,
+                "LUN{l}: entries differ from the plan after writing"
+            );
+        }
+        ensure!(
+            boot_slot_of(&parts_of(&after))? == s,
+            "boot slot is not _{s} after writing"
+        );
+        println!("slot     _{s} active; GPTs re-read: all CRCs valid, primary == backup");
+    }
+    if bootlun {
+        if o.yes {
+            fh.set_bootable(boot_lun)?;
+            println!("bootlun  UFS boot LUN set to {boot_lun} (xbl_{s})");
+        } else {
+            println!("dry run  would set UFS boot LUN to {boot_lun} (setbootablestoragedrive)");
+        }
+    }
+    Ok(())
+}
+
+fn unlock(fh: &mut Fh, p: &Profile, relock: bool, o: Opts) -> Result<()> {
+    let (v, ss) = (!relock as u8, p.sector_size as u64);
+    let mut writes = Vec::new();
+    let (l, e) = find_part(fh, p, "devinfo", None)?;
+    let mut s = fh.read_vec(l, e.first_lba, 1)?;
+    devinfo::parse(&s).context("devinfo")?;
+    println!("unlock   devinfo is_unlocked (byte 0x0d) = {}", s[0x0d]);
+    if s[0x0d] != v {
+        s[0x0d] = v;
+        writes.push(write::Write {
+            region: region(l, &e),
+            image: Image::bytes("devinfo sector 0", 0, s),
+        });
+    }
+    if let Some((name, off)) = &p.unlock_flag {
+        let (l, e) = find_part(fh, p, name, None)?;
+        let off = flag_offset(&e, ss, *off);
+        let (sec, i) = (off / ss, (off % ss) as usize);
+        let mut s = fh.read_vec(l, e.first_lba + sec, 1)?;
+        println!(
+            "unlock   {name}[{off}] (LUN{l} sector {} offset {i}) = {}",
+            e.first_lba + sec,
+            s[i]
+        );
+        if s[i] != v {
+            s[i] = v;
+            writes.push(write::Write {
+                region: region(l, &e),
+                image: Image::bytes(&format!("{name} sector {sec}"), sec * ss, s),
+            });
+        }
+    }
+    if writes.is_empty() {
+        println!(
+            "unlock   already {}; nothing to do",
+            if relock { "locked" } else { "unlocked" }
+        );
+        return Ok(());
+    }
+    write::run(fh, &p.protected, &writes, o, &backups())?;
+    Ok(())
+}
+
+fn install_nixos(p: &Profile, loader: Option<&Path>, dir: &Path, slot: Option<char>, o: Opts) -> Result<()> {
+    let (boot_path, sys_path) = (dir.join("boot.img"), dir.join("system.img"));
+    let mut magic = [0u8; 8];
+    std::fs::File::open(&boot_path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .with_context(|| format!("reading {}", boot_path.display()))?;
+    ensure!(
+        &magic == b"ANDROID!",
+        "{} is not an Android boot image",
+        boot_path.display()
+    );
+    let boot = Image::open(&boot_path)?;
+    let system = Image::open(&sys_path)?;
+
+    let mut fh = connect(p, loader)?;
+    let parts = parts_of(&all_gpts(&mut fh, p)?);
+    let current = boot_slot_of(&parts);
+    let s = match (slot, &current) {
+        (Some(s), _) => s,
+        (None, Ok(s)) => *s,
+        (None, Err(e)) => bail!("cannot tell the boot slot ({e}); pass --slot"),
+    };
+    let (bl, be) = find_in(&parts, &format!("boot_{s}"))?;
+    let (ul, ue) = find_in(&parts, "userdata")?;
+    let writes = [
+        write::Write {
+            region: region(bl, &be),
+            image: boot,
+        },
+        write::Write {
+            region: region(ul, &ue),
+            image: system,
+        },
+    ];
+    if write::run(&mut fh, &p.protected, &writes, o, &backups())? {
+        println!("next     installed to slot _{s}. Then:");
+        if current.ok() != Some(s) {
+            println!("           mtk slot {s} --yes");
+        }
+        println!("           mtk reset");
+    }
+    Ok(())
 }
