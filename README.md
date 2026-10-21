@@ -22,6 +22,8 @@ mtk flash <partition> <image> [--lun N]   # raw or Android sparse image
 mtk slot a|b [--bootlun]                  # set the active A/B slot
 mtk unlock [--relock]                     # devinfo + config unlock bytes
 mtk install-nixos <dir> [--slot a|b]      # mobile-nixos fastboot images
+
+mtk ops <file.ops> [--list] [--extract <dir>]   # OnePlus firmware package, no device
 ```
 
 Global options: `--device <name|file.toml>` (default `fajita`) and
@@ -39,6 +41,13 @@ Global options: `--device <name|file.toml>` (default `fajita`) and
   OnePlus OEM-unlock-allowed byte in `config`.
 - **`--verify`:** hashes the slot-a firmware and compares it to the profile's
   known-good SHA-256 list.
+
+`ops` reads a OnePlus MsmDownloadTool `.ops` package. It decrypts the
+`settings.xml` flash plan (mbox4/5/6 keys) and prints the project id, firmware
+name and counts. `--list` prints every program entry (LUN, partition, start
+sector, sector count, image file, sparse/erase flags). `--extract` streams
+`settings.xml` and every image into a directory, decrypting the firehose loader,
+and checks the SHA-256 that settings.xml gives for each non-sparse image.
 
 ## Writes
 
@@ -152,4 +161,6 @@ MTK_REAL_DUMPS=/path/to/dumps nix develop -c cargo test -- --ignored   # real GP
 The protocol logic (Sahara, Firehose framing, GPT/A-B handling, and the
 OnePlus auth notes in `docs/oneplus-auth.md`) is ported from or informed by
 [bkerler/edl](https://github.com/bkerler/edl) by B. Kerler (GPL-3.0). Thank
-you. mtk is GPL-3.0 as well.
+you. mtk is GPL-3.0 as well. The `.ops` decryption is ported from
+[bkerler/oppo_decrypt](https://github.com/bkerler/oppo_decrypt) `opscrypto.py`
+by B. Kerler (that file's header says MIT License).

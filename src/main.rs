@@ -86,6 +86,16 @@ enum Cmd {
         #[command(flatten)]
         w: WriteFlags,
     },
+    /// Inspect or extract a OnePlus .ops firmware package (no device needed)
+    Ops {
+        file: PathBuf,
+        /// Decrypt settings.xml and write every image into this directory
+        #[arg(long)]
+        extract: Option<PathBuf>,
+        /// Print the program table (LUN, partition, start, file)
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[derive(Args, Clone, Copy)]
@@ -195,6 +205,10 @@ fn run(cli: &Cli, p: &Profile) -> Result<ExitCode> {
             install_nixos(p, cli.loader.as_deref(), dir, slot.map(SlotArg::c), (*w).into())?;
             Ok(ExitCode::SUCCESS)
         }
+        Cmd::Ops { file, extract, list } => Ok(match mobile_toolkit::ops::cli(file, extract.as_deref(), *list)? {
+            true => ExitCode::SUCCESS,
+            false => ExitCode::FAILURE,
+        }),
     }
 }
 
