@@ -142,19 +142,34 @@ impl Cfb {
         }
     }
 
+    fn keystream(&self) -> [u8; 16] {
+        let ks = if self.short {
+            block(self.iv, |n| TBL[n] as u32, TBL[0x3c] as usize)
+        } else {
+            block(self.iv, |n| self.mbox.get(n).map_or(0, |&b| b as u32), 10)
+        };
+        std::array::from_fn(|n| ks[n / 4].to_le_bytes()[n % 4])
+    }
+
     /// Decrypt in place. Every call but the last must be a multiple of 16 bytes.
     pub fn decrypt(&mut self, buf: &mut [u8]) {
         for blk in buf.chunks_mut(16) {
-            let ks = if self.short {
-                block(self.iv, |n| TBL[n] as u32, TBL[0x3c] as usize)
-            } else {
-                block(self.iv, |n| self.mbox.get(n).map_or(0, |&b| b as u32), 10)
-            };
-            let ks: [u8; 16] = std::array::from_fn(|n| ks[n / 4].to_le_bytes()[n % 4]);
+            let ks = self.keystream();
             if blk.len() == 16 {
                 self.iv = words(blk);
             }
             blk.iter_mut().zip(ks).for_each(|(b, k)| *b ^= k);
+        }
+    }
+
+    /// Encrypt in place: the inverse of `decrypt` (used to build test packages).
+    pub fn encrypt(&mut self, buf: &mut [u8]) {
+        for blk in buf.chunks_mut(16) {
+            let ks = self.keystream();
+            blk.iter_mut().zip(ks).for_each(|(b, k)| *b ^= k);
+            if blk.len() == 16 {
+                self.iv = words(blk);
+            }
         }
     }
 }

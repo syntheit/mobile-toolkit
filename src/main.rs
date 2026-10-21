@@ -6,7 +6,7 @@ use mobile_toolkit::image::{Image, hex};
 use mobile_toolkit::profile::{Profile, chown_to_user, data_dir};
 use mobile_toolkit::usb::{self, Mode, Usb};
 use mobile_toolkit::write::{self, Opts, Region, size};
-use mobile_toolkit::{devinfo, sahara, slot};
+use mobile_toolkit::{devinfo, eprint, eprintln, println, sahara, slot};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
