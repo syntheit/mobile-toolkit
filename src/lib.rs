@@ -3,3 +3,5 @@
 pub mod devinfo;
 pub mod gpt;
 pub mod profile;
+pub mod sahara;
+pub mod usb;
