@@ -6,4 +6,5 @@ pub mod gpt;
 pub mod image;
 pub mod profile;
 pub mod sahara;
+pub mod slot;
 pub mod usb;

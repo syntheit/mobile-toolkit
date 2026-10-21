@@ -107,6 +107,8 @@ impl fmt::Display for Ab {
 
 #[derive(Debug, Clone)]
 pub struct Entry {
+    /// Slot in the entry array.
+    pub index: usize,
     pub type_guid: [u8; 16],
     pub unique_guid: [u8; 16],
     pub first_lba: u64,
@@ -133,8 +135,9 @@ pub fn parse_entries(buf: &[u8], hdr: &Header) -> Vec<Entry> {
     let esz = hdr.entry_size as usize;
     buf[..hdr.entries_bytes()]
         .chunks_exact(esz)
-        .filter(|e| e[0..16].iter().any(|&b| b != 0))
-        .map(|e| {
+        .enumerate()
+        .filter(|(_, e)| e[0..16].iter().any(|&b| b != 0))
+        .map(|(index, e)| {
             let name: Vec<u16> = e[56..128]
                 .as_chunks::<2>()
                 .0
@@ -143,6 +146,7 @@ pub fn parse_entries(buf: &[u8], hdr: &Header) -> Vec<Entry> {
                 .take_while(|&c| c != 0)
                 .collect();
             Entry {
+                index,
                 type_guid: e[0..16].try_into().unwrap(),
                 unique_guid: e[16..32].try_into().unwrap(),
                 first_lba: u64le(e, 32),
@@ -158,17 +162,20 @@ pub fn parse_entries(buf: &[u8], hdr: &Header) -> Vec<Entry> {
 #[derive(Debug, Clone)]
 pub struct Table {
     pub header: Header,
+    /// The whole header sector as read.
+    pub raw_header: Vec<u8>,
     pub raw_entries: Vec<u8>,
     pub entries_crc_ok: bool,
 }
 
 impl Table {
-    fn new(header: Header, mut raw: Vec<u8>) -> Result<Table> {
+    fn new(header: Header, raw_header: &[u8], mut raw: Vec<u8>) -> Result<Table> {
         ensure!(raw.len() >= header.entries_bytes(), "short GPT entry array");
         raw.truncate(header.entries_bytes());
         let entries_crc_ok = crc32fast::hash(&raw) == header.entries_crc;
         Ok(Table {
             header,
+            raw_header: raw_header.to_vec(),
             raw_entries: raw,
             entries_crc_ok,
         })
@@ -197,7 +204,7 @@ pub fn read_lun(read: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>>, ss: usize) ->
         issues.push(format!("primary header MyLBA={} (expected 1)", ph.my_lba));
     }
     let raw = read(ph.entries_lba, ph.entries_sectors(ss))?;
-    let primary = Table::new(ph, raw)?;
+    let primary = Table::new(ph, &head[ss..2 * ss], raw)?;
     let ph = &primary.header;
     if !ph.crc_ok {
         issues.push("primary header CRC mismatch".into());
@@ -208,10 +215,10 @@ pub fn read_lun(read: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>>, ss: usize) ->
 
     // Backup header lives at the primary's AlternateLBA; its entries at the
     // backup header's own PartitionEntryLBA (not necessarily alt-1).
-    let backup = match read(ph.alt_lba, 1).and_then(|s| Header::parse(&s)) {
-        Ok(bh) => {
+    let backup = match read(ph.alt_lba, 1).and_then(|s| Ok((Header::parse(&s)?, s))) {
+        Ok((bh, s)) => {
             let raw = read(bh.entries_lba, bh.entries_sectors(ss))?;
-            Some(Table::new(bh, raw)?)
+            Some(Table::new(bh, &s, raw)?)
         }
         Err(e) => {
             issues.push(format!("backup header at LBA {}: {e}", ph.alt_lba));
@@ -228,6 +235,17 @@ pub fn read_lun(read: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>>, ss: usize) ->
         entries,
         issues,
     })
+}
+
+/// A header sector updated for a new entry array: entries CRC, then header CRC.
+pub fn rebuild_header(raw_header: &[u8], entries: &[u8]) -> Vec<u8> {
+    let mut h = raw_header.to_vec();
+    let size = u32le(&h, 12) as usize;
+    h[88..92].copy_from_slice(&crc32fast::hash(entries).to_le_bytes());
+    h[16..20].fill(0);
+    let crc = crc32fast::hash(&h[..size]);
+    h[16..20].copy_from_slice(&crc.to_le_bytes());
+    h
 }
 
 fn pmbr_ok(s: &[u8]) -> bool {
@@ -364,7 +382,7 @@ pub(crate) mod tests {
 
     pub const SS: usize = 4096;
 
-    fn entry(name: &str, type_prefix: u32, first: u64, last: u64, ab: u8) -> Vec<u8> {
+    pub fn entry(name: &str, type_prefix: u32, first: u64, last: u64, ab: u8) -> Vec<u8> {
         let mut e = vec![0u8; 128];
         e[0..4].copy_from_slice(&type_prefix.to_le_bytes());
         e[4] = 1; // rest of the type GUID
@@ -378,7 +396,7 @@ pub(crate) mod tests {
         e
     }
 
-    fn header(my: u64, alt: u64, entries_lba: u64, n: u32, ecrc: u32, last_lba: u64) -> Vec<u8> {
+    pub fn header(my: u64, alt: u64, entries_lba: u64, n: u32, ecrc: u32, last_lba: u64) -> Vec<u8> {
         let mut h = vec![0u8; SS];
         h[0..8].copy_from_slice(b"EFI PART");
         h[8..12].copy_from_slice(&0x10000u32.to_le_bytes());
@@ -400,13 +418,19 @@ pub(crate) mod tests {
     /// A 64-sector disk laid out like a Qualcomm UFS LUN: entries at LBA 2..6,
     /// backup entries at last-4, backup header at last.
     pub fn disk() -> Vec<u8> {
+        disk_of(&[
+            entry("boot_a", 0x20117f86, 10, 19, 0x6f),
+            entry("boot_b", OP_INACTIVE_TYPE, 20, 29, 0x3a),
+            entry("xbl_a", 0xdea0ba2c, 30, 31, 0x44),
+            entry("modemst1", 0xebbeadaf, 32, 33, 0),
+        ])
+    }
+
+    /// A 64-sector disk holding the given (up to 32) entries.
+    pub fn disk_of(entries: &[Vec<u8>]) -> Vec<u8> {
         let sectors = 64u64;
         let last = sectors - 1;
-        let mut ents = Vec::new();
-        ents.extend(entry("boot_a", 0x20117f86, 10, 19, 0x6f));
-        ents.extend(entry("boot_b", OP_INACTIVE_TYPE, 20, 29, 0x3a));
-        ents.extend(entry("xbl_a", 0xdea0ba2c, 30, 31, 0x44));
-        ents.extend(entry("modemst1", 0xebbeadaf, 32, 33, 0));
+        let mut ents = entries.concat();
         ents.resize(32 * 128, 0);
         let ecrc = crc32fast::hash(&ents);
         let mut d = vec![0u8; sectors as usize * SS];
