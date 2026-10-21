@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mobile_toolkit::firehose::Firehose;
 use mobile_toolkit::gpt::{self, Ab, Entry, LunGpt, OP_INACTIVE_TYPE};
@@ -232,26 +232,22 @@ fn load_loader(p: &Profile, over: Option<&Path>) -> Result<(PathBuf, Vec<u8>)> {
 }
 
 /// Get the device into firehose mode (uploading the loader if needed) and configure it.
+/// The loader is read and checked first: failing after the Sahara hello was
+/// consumed would leave the device wedged until it is power-cycled.
 fn connect(p: &Profile, loader: Option<&Path>) -> Result<Fh> {
+    let (path, data) = load_loader(p, loader)?;
     match usb::detect((p.edl_vid, p.edl_pid), p.fastboot_vid)? {
         Mode::Edl => {}
         m => bail!("device not in EDL mode ({})", describe(&m, p)),
     }
     let mut dev = Usb::open(p.edl_vid, p.edl_pid)?;
-    let leftover = match sahara::probe(&mut dev)? {
-        sahara::Probe::Sahara(hello) => {
-            let (path, data) = load_loader(p, loader)?;
-            let (info, hello) = sahara::info(&mut dev, hello)?;
-            print_sahara(&info, hello.version, p);
-            sahara::upload(&mut dev, hello, &data)?;
-            println!("loader   uploaded {}", path.display());
-            vec![]
-        }
-        sahara::Probe::Firehose(buf) => {
-            println!("loader   already running (firehose answered), skipping upload");
-            buf
-        }
-    };
+    // Any Sahara failure leaves the PBL waiting for a state we can't restore.
+    let leftover = sahara_phase(&mut dev, p, &path, &data).map_err(|e| {
+        anyhow!(
+            "{e:#}\nhint: power-cycle it into EDL: unplug, hold Power+VolUp ~15 s, \
+             then hold VolUp+VolDown while plugging in"
+        )
+    })?;
     let mut fh = Firehose::new(dev, leftover, p.sector_size);
     fh.drain()?;
     fh.configure(&p.memory)?;
@@ -260,6 +256,24 @@ fn connect(p: &Profile, loader: Option<&Path>) -> Result<Fh> {
         fh.target, p.memory, fh.max_payload
     );
     Ok(fh)
+}
+
+/// Probe; in Sahara, identify the SoC and upload the loader. Returns bytes a
+/// running firehose loader already sent.
+fn sahara_phase(dev: &mut Usb, p: &Profile, path: &Path, data: &[u8]) -> Result<Vec<u8>> {
+    Ok(match sahara::probe(dev)? {
+        sahara::Probe::Sahara(hello) => {
+            let (info, hello) = sahara::info(dev, hello)?;
+            print_sahara(&info, hello.version, p);
+            sahara::upload(dev, hello, data)?;
+            println!("loader   uploaded {}", path.display());
+            vec![]
+        }
+        sahara::Probe::Firehose(buf) => {
+            println!("loader   already running (firehose answered), skipping upload");
+            buf
+        }
+    })
 }
 
 /// Send `<power>`, then keep the USB handle (so no kernel driver rebinds to a

@@ -115,10 +115,7 @@ pub fn probe(t: &mut dyn Transport) -> Result<Probe> {
     match t.read(4096, Duration::from_secs(1))? {
         Some(p) if p.windows(5).any(|w| w == b"<?xml") => Ok(Probe::Firehose(p)),
         Some(p) if p.len() >= 8 => Err(unexpected(&p, "probe")),
-        _ => bail!(
-            "device in EDL but not answering (stale Sahara session?). \
-             Power-cycle it back into EDL and retry"
-        ),
+        _ => bail!("device in EDL but not answering (stale Sahara session?)"),
     }
 }
 
