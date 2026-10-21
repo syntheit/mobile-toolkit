@@ -60,12 +60,12 @@ enum Cmd {
         #[command(flatten)]
         w: WriteFlags,
     },
-    /// Make slot a or b active on every A/B pair (GPT attributes + OnePlus type GUIDs)
+    /// Make slot a or b active: GPT attributes, OnePlus type GUIDs and the UFS boot LUN
     Slot {
         slot: SlotArg,
-        /// Also point the UFS boot LUN at xbl_<slot> (setbootablestoragedrive)
+        /// Leave the UFS boot LUN (which xbl runs) alone; only change the GPT
         #[arg(long)]
-        bootlun: bool,
+        no_bootlun: bool,
         #[command(flatten)]
         w: WriteFlags,
     },
@@ -191,9 +191,9 @@ fn run(cli: &Cli, p: &Profile) -> Result<ExitCode> {
             write::run(&mut fh, &p.protected, &[target], (*w).into(), &backups())?;
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Slot { slot, bootlun, w } => {
+        Cmd::Slot { slot, no_bootlun, w } => {
             let mut fh = connect(p, cli.loader.as_deref())?;
-            set_slot(&mut fh, p, slot.c(), *bootlun, (*w).into())?;
+            set_slot(&mut fh, p, slot.c(), !*no_bootlun, (*w).into())?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Unlock { relock, w } => {
@@ -618,8 +618,9 @@ fn set_slot(fh: &mut Fh, p: &Profile, s: char, bootlun: bool, o: Opts) -> Result
     let boot_lun = if s == 'a' { 1 } else { 2 };
     if !bootlun {
         println!(
-            "note     UFS boot LUN (bBootLunEn) is separate and NOT changed: it alone picks xbl \
-             from LUN1 (xbl_a) or LUN2 (xbl_b); --bootlun sets it to {boot_lun}"
+            "note     UFS boot LUN (bBootLunEn) NOT changed (--no-bootlun). It alone picks xbl_a (LUN1) \
+             or xbl_b (LUN2) and cannot be read back; if it points at xbl_{}, boot hangs before the kernel",
+            if s == 'a' { 'b' } else { 'a' }
         );
     }
     if writes.is_empty() {
@@ -639,12 +640,13 @@ fn set_slot(fh: &mut Fh, p: &Profile, s: char, bootlun: bool, o: Opts) -> Result
         );
         println!("slot     _{s} active; GPTs re-read: all CRCs valid, primary == backup");
     }
+    // Always sent when wanted: it is cheap and its current value cannot be read back.
     if bootlun {
         if o.yes {
             fh.set_bootable(boot_lun)?;
             println!("bootlun  UFS boot LUN set to {boot_lun} (xbl_{s})");
         } else {
-            println!("dry run  would set UFS boot LUN to {boot_lun} (setbootablestoragedrive)");
+            println!("dry run  would set UFS boot LUN to {boot_lun} (xbl_{s}, setbootablestoragedrive)");
         }
     }
     Ok(())

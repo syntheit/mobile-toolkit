@@ -19,7 +19,7 @@ mtk read <partition> <out> [--lun N]
 mtk reset [--off]                # leave EDL (firehose power command)
 
 mtk flash <partition> <image> [--lun N]   # raw or Android sparse image
-mtk slot a|b [--bootlun]                  # set the active A/B slot
+mtk slot a|b [--no-bootlun]               # set the active A/B slot and UFS boot LUN
 mtk unlock [--relock]                     # devinfo + config unlock bytes
 mtk install-nixos <dir> [--slot a|b]      # mobile-nixos fastboot images
 
@@ -99,9 +99,16 @@ simply be repeated.
   mtk refuses a LUN whose header CRCs are bad.
 - After writing, mtk re-reads all GPTs and checks CRCs, primary == backup,
   and the boot slot.
-- The UFS boot LUN (`bBootLunEn`, which picks `xbl_a` on LUN1 or `xbl_b` on
-  LUN2) is separate and is **not** changed unless `--bootlun` is given.
-  `--bootlun` sends firehose `setbootablestoragedrive` with 1 for a, 2 for b.
+- Then it sets the UFS boot LUN (`bBootLunEn`) with firehose
+  `setbootablestoragedrive`: 1 for a, 2 for b. It does this even when the GPT
+  is already on the target slot, because the value is cheap to set and cannot
+  be read back. `--no-bootlun` skips it.
+
+Why the boot LUN matters: the boot ROM picks xbl from the boot LUN (`xbl_a` on
+LUN1, `xbl_b` on LUN2) and never looks at the GPT slot attributes, so a slot
+switch that leaves it behind runs one slot's xbl with the other slot's abl.
+On fajita that hangs before any kernel starts, and every partition still
+checks out fine, which is how a phone stayed bricked for seven weeks.
 
 This avoids the edl `setactiveslot` bugs: it stopping after the first `_a`
 partition, the unconditional type swap, and reading past the end of a LUN.
