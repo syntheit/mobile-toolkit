@@ -4,6 +4,7 @@
 
 use crate::firehose::Firehose;
 use crate::image::{Image, hex};
+use crate::profile::{chown_to_user, create_dir_all_owned};
 use crate::usb::Transport;
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -182,13 +183,18 @@ fn print_plan(w: &Write, ss: u64) {
 /// timestamped directory, with SHA256SUMS and LOCATIONS files.
 fn backup<T: Transport>(fh: &mut Firehose<T>, writes: &[Write], full: bool, root: &Path) -> Result<PathBuf> {
     let ss = fh.sector_size as u64;
-    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    create_dir_all_owned(root).with_context(|| format!("creating {}", root.display()))?;
     let stamp = utc_stamp(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()));
     let dir = (0..)
         .map(|i| root.join(if i == 0 { stamp.clone() } else { format!("{stamp}-{i}") }))
         .find(|d| std::fs::create_dir(d).is_ok())
         .unwrap();
-    let append = |name: &str| OpenOptions::new().create(true).append(true).open(dir.join(name));
+    chown_to_user(&dir);
+    let append = |name: &str| {
+        let f = OpenOptions::new().create(true).append(true).open(dir.join(name));
+        chown_to_user(&dir.join(name));
+        f
+    };
     let (mut sums, mut locs) = (append("SHA256SUMS")?, append("LOCATIONS")?);
     for w in writes {
         let r = &w.region;
@@ -205,6 +211,7 @@ fn backup<T: Transport>(fh: &mut Firehose<T>, writes: &[Write], full: bool, root
         for (ext, off, n) in ranges {
             let file = format!("{}.{ext}", r.name);
             let mut f = std::io::BufWriter::new(File::create(dir.join(&file))?);
+            chown_to_user(&dir.join(&file));
             let mut h = Sha256::new();
             let mut p = Progress::new(&format!("backup {}", r.name), n * ss);
             fh.read(r.lun, r.start + off, n, &mut |d| {

@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use mobile_toolkit::firehose::Firehose;
 use mobile_toolkit::gpt::{self, Ab, Entry, LunGpt, OP_INACTIVE_TYPE};
 use mobile_toolkit::image::{Image, hex};
-use mobile_toolkit::profile::{Profile, data_dir};
+use mobile_toolkit::profile::{Profile, chown_to_user, data_dir};
 use mobile_toolkit::usb::{self, Mode, Usb};
 use mobile_toolkit::write::{self, Opts, Region, size};
 use mobile_toolkit::{devinfo, sahara, slot};
@@ -414,6 +414,7 @@ fn read_partition(fh: &mut Fh, p: &Profile, name: &str, out: &Path, lun: Option<
     );
     let mut f =
         std::io::BufWriter::new(std::fs::File::create(out).with_context(|| format!("creating {}", out.display()))?);
+    chown_to_user(out);
     let mut h = Sha256::new();
     let t0 = std::time::Instant::now();
     read_entry(fh, lun, &e, &mut |d| {

@@ -136,7 +136,11 @@ The firehose loader is proprietary, so it is not in this repo. Get it from
 bkerler/edl, file `Loaders/oneplus/0008b0e10051459b_dd7c5f2e53176bee_fhprg_op6t.bin`,
 and put it in `$MTK_DATA/loaders/` (default
 `~/.local/share/mobile-toolkit/loaders/`). mtk checks its SHA-256 against
-the device profile before uploading it.
+the device profile before it opens the USB device.
+
+Under `sudo`, `~` means the invoking user's home (`$SUDO_HOME`, else their
+`/etc/passwd` entry), not `/root`, and backups are handed back to that user
+(`SUDO_UID`/`SUDO_GID`). `$MTK_DATA` overrides all of this.
 
 ## Device profiles
 

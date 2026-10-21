@@ -2,6 +2,7 @@
 //! compile time; `--device path/to/x.toml` loads one from disk.
 
 use anyhow::{Context, Result, anyhow};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use toml::{Table, Value};
 
@@ -113,13 +114,47 @@ impl Profile {
     }
 }
 
-/// `$MTK_DATA`, else `~/.local/share/mobile-toolkit`.
+/// `$MTK_DATA`, else `~/.local/share/mobile-toolkit`. Under sudo, `~` is the
+/// invoking user's home (`$SUDO_HOME`, else their /etc/passwd entry), not /root.
 pub fn data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("MTK_DATA") {
+    let passwd = || std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    resolve_data_dir(&|k| std::env::var_os(k), passwd)
+}
+
+fn resolve_data_dir(env: &dyn Fn(&str) -> Option<OsString>, passwd: impl FnOnce() -> String) -> PathBuf {
+    if let Some(d) = env("MTK_DATA") {
         return d.into();
     }
-    let home = std::env::var_os("HOME").unwrap_or_default();
+    let sudo_home = || {
+        let user = env("SUDO_USER").filter(|u| !u.is_empty() && u != "root")?;
+        env("SUDO_HOME").or_else(|| {
+            let user = user.to_str()?;
+            let line = passwd().lines().find(|l| l.split(':').next() == Some(user))?.to_owned();
+            line.split(':').nth(5).filter(|h| !h.is_empty()).map(Into::into)
+        })
+    };
+    let home = sudo_home().or_else(|| env("HOME")).unwrap_or_default();
     Path::new(&home).join(".local/share/mobile-toolkit")
+}
+
+/// Give a file or directory created under sudo back to the invoking user
+/// (`SUDO_UID`/`SUDO_GID`). Best effort; a no-op without sudo.
+pub fn chown_to_user(p: &Path) {
+    let id = |k| std::env::var(k).ok()?.parse::<u32>().ok();
+    if let (Some(u), Some(g)) = (id("SUDO_UID"), id("SUDO_GID")) {
+        let _ = std::os::unix::fs::chown(p, Some(u), Some(g));
+    }
+}
+
+/// `create_dir_all`, then [`chown_to_user`] every directory it created.
+pub fn create_dir_all_owned(d: &Path) -> std::io::Result<()> {
+    let missing: Vec<&Path> = d
+        .ancestors()
+        .take_while(|a| !a.as_os_str().is_empty() && !a.exists())
+        .collect();
+    std::fs::create_dir_all(d)?;
+    missing.into_iter().for_each(chown_to_user);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -139,5 +174,22 @@ mod tests {
                 .iter()
                 .any(|(n, h)| n == "boot_a" && h.starts_with("a1852772"))
         );
+    }
+
+    #[test]
+    fn data_dir_under_sudo() {
+        let passwd = || "root:x:0:0::/root:/bin/sh\nalice:x:1000:100:Alice:/home/alice:/bin/zsh\n".to_string();
+        let dir = |vars: &[(&str, &str)]| {
+            let env = |k: &str| vars.iter().find(|v| v.0 == k).map(|v| OsString::from(v.1));
+            resolve_data_dir(&env, passwd)
+        };
+        let share = |h: &str| PathBuf::from(h).join(".local/share/mobile-toolkit");
+        assert_eq!(dir(&[("HOME", "/home/bob")]), share("/home/bob"));
+        assert_eq!(dir(&[("HOME", "/root"), ("SUDO_USER", "alice")]), share("/home/alice"));
+        let sudo_home = [("HOME", "/root"), ("SUDO_USER", "alice"), ("SUDO_HOME", "/srv/a")];
+        assert_eq!(dir(&sudo_home), share("/srv/a"));
+        assert_eq!(dir(&[("HOME", "/root"), ("SUDO_USER", "root")]), share("/root"));
+        assert_eq!(dir(&[("HOME", "/root"), ("SUDO_USER", "nobody")]), share("/root"));
+        assert_eq!(dir(&[("MTK_DATA", "/d"), ("SUDO_USER", "alice")]), PathBuf::from("/d"));
     }
 }
