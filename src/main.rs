@@ -170,11 +170,7 @@ fn run(cli: &Cli, p: &Profile) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Reset { off } => {
-            connect(p, cli.loader.as_deref())?.power(if *off { "off" } else { "reset" })?;
-            println!("sent power {}", if *off { "off" } else { "reset" });
-            Ok(ExitCode::SUCCESS)
-        }
+        Cmd::Reset { off } => reset(p, cli.loader.as_deref(), if *off { "off" } else { "reset" }),
         Cmd::Flash {
             partition,
             image,
@@ -264,6 +260,30 @@ fn connect(p: &Profile, loader: Option<&Path>) -> Result<Fh> {
         fh.target, p.memory, fh.max_payload
     );
     Ok(fh)
+}
+
+/// Send `<power>`, then keep the USB handle (so no kernel driver rebinds to a
+/// live loader) until the device leaves EDL, and say whether it did.
+fn reset(p: &Profile, loader: Option<&Path>, mode: &str) -> Result<ExitCode> {
+    let mut fh = connect(p, loader)?;
+    for l in fh.power(mode)? {
+        println!("firehose {l}");
+    }
+    println!("power    {mode} acknowledged");
+    let t0 = std::time::Instant::now();
+    while usb::detect((p.edl_vid, p.edl_pid), p.fastboot_vid)? == Mode::Edl {
+        if t0.elapsed() > std::time::Duration::from_secs(10) {
+            println!(
+                "warning  still in EDL 10 s after the power command; power-cycle it by hand \
+                 (hold Power+VolUp ~15 s)"
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    drop(fh);
+    println!("usb      device left EDL after {:.1}s", t0.elapsed().as_secs_f64());
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_sahara(info: &sahara::Info, version: u32, p: &Profile) {

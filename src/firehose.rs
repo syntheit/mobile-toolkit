@@ -276,9 +276,17 @@ impl<T: Transport> Firehose<T> {
             .map(|_| ())
     }
 
-    /// `reset` or `off`.
-    pub fn power(&mut self, mode: &str) -> Result<()> {
-        self.command(&format!("<power value=\"{mode}\"/>"), TIMEOUT).map(|_| ())
+    /// `reset` or `off`, byte for byte what edl `cmd_reset` sends. Like edl,
+    /// keep reading after the ACK until the loader goes quiet (or the device
+    /// drops off the bus): it sends its last log lines before acting on the
+    /// command, and a host that stops reading leaves it blocked, still in EDL.
+    /// Returns every log line seen.
+    pub fn power(&mut self, mode: &str) -> Result<Vec<String>> {
+        let mut logs = self.command(&format!("<power value=\"{mode}\"/>"), TIMEOUT)?.logs;
+        while let Ok(Some(doc)) = self.next_doc(Duration::from_secs(1)) {
+            parse_doc(&doc, &mut logs);
+        }
+        Ok(logs)
     }
 }
 
@@ -393,6 +401,25 @@ mod tests {
             e.contains("program of LUN 4 sectors 100+1 failed") && e.contains("failed to write"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn power_matches_edl_and_reads_until_quiet() {
+        let m = Mock::new(vec![
+            doc("<response value=\"ACK\" />"),
+            doc("<log value=\"INFO: Calling power reset\" />"),
+            Some(vec![]),
+            doc("<log value=\"INFO: bye\" />"),
+            None,
+            doc("<log value=\"never read\" />"),
+        ]);
+        let mut fh = Firehose::new(m, vec![], 4096);
+        assert_eq!(fh.power("reset").unwrap(), ["INFO: Calling power reset", "INFO: bye"]);
+        assert_eq!(
+            fh.t.writes,
+            [b"<?xml version=\"1.0\" ?><data><power value=\"reset\"/></data>".to_vec()]
+        );
+        assert_eq!(fh.t.reads.len(), 1);
     }
 
     #[test]

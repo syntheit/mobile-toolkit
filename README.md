@@ -16,7 +16,7 @@ First target: OnePlus 6T "fajita" (SDM845, UFS, 6 LUNs).
 mtk status [--verify]            # mode, GPT health per LUN, A/B slots, lock state
 mtk gpt [--lun N]                # print partition tables
 mtk read <partition> <out> [--lun N]
-mtk reset [--off]                # leave EDL (firehose power command)
+mtk reset [--off]                # leave EDL, then wait until the device is gone
 
 mtk flash <partition> <image> [--lun N]   # raw or Android sparse image
 mtk slot a|b [--no-bootlun]               # set the active A/B slot and UFS boot LUN
