@@ -23,9 +23,13 @@ pkhash_prefix = "dd7c5f2e53176bee"
 protected = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
 
 [oem]
-# OnePlus: byte in `config` that holds the OEM-unlock-allowed flag
+# OnePlus: byte in `config` (the FRP partition) that holds the OEM-unlock-allowed
+# flag. Negative = from the end: -1 is the last byte, as in Android's
+# PersistentDataBlockService and edl `oemunlock` (which patches offset 0x7FFFF of
+# the 512 KiB partition, i.e. sector 127 offset 4095, and prints it as
+# "sector <partition start>, offset 4095").
 unlock_flag_partition = "config"
-unlock_flag_offset = 4095
+unlock_flag_offset = -1
 
 # Pre-deploy known-good slot-a hashes (mtk status --verify)
 [known_good]

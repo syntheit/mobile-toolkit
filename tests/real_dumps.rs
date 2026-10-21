@@ -217,5 +217,9 @@ fn real_dumps() {
     let di = devinfo::parse(&std::fs::read(d.join("devinfo.img")).unwrap()).unwrap();
     println!("devinfo: {di:?}");
     let cfg = std::fs::read(d.join("config.img")).unwrap();
-    println!("config[4095] = 0x{:02x}", cfg[4095]);
+    println!(
+        "config[last] = 0x{:02x}  config[4095] = 0x{:02x}",
+        cfg[cfg.len() - 1],
+        cfg[4095]
+    );
 }

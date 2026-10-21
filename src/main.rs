@@ -224,6 +224,15 @@ fn print_gpt(lun: u8, g: &LunGpt, p: &Profile) {
     }
 }
 
+/// Byte offset of the OEM flag in its partition; negative counts from the end.
+fn flag_offset(e: &Entry, ss: u64, off: i64) -> u64 {
+    if off < 0 {
+        e.sectors() * ss - off.unsigned_abs()
+    } else {
+        off as u64
+    }
+}
+
 /// Look a partition up by name, across all LUNs unless one is given.
 fn find_part(fh: &mut Fh, p: &Profile, name: &str, lun: Option<u8>) -> Result<(u8, Entry)> {
     let luns: Vec<u8> = lun.map_or_else(|| (0..p.luns).collect(), |l| vec![l]);
@@ -379,6 +388,7 @@ fn status(p: &Profile, loader: Option<&Path>, verify: bool) -> Result<ExitCode> 
         let ss = p.sector_size as u64;
         match find(pname) {
             Some((l, e)) => {
+                let off = flag_offset(&e, ss, *off);
                 let b = fh.read_vec(l, e.first_lba + off / ss, 1)?;
                 let v = b[(off % ss) as usize];
                 let meaning = if v != 0 {

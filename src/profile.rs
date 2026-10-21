@@ -21,7 +21,8 @@ pub struct Profile {
     pub hwid: Option<String>,
     pub pkhash_prefix: Option<String>,
     pub protected: Vec<String>,
-    pub unlock_flag: Option<(String, u64)>,
+    /// (partition, byte offset); a negative offset counts from the partition end.
+    pub unlock_flag: Option<(String, i64)>,
     /// (partition, sha256), sorted by partition name.
     pub known_good: Vec<(String, String)>,
 }
@@ -96,7 +97,7 @@ impl Profile {
             protected: strings("partitions.protected").unwrap_or_default(),
             unlock_flag: s(&t, "oem.unlock_flag_partition")
                 .ok()
-                .zip(int(&t, "oem.unlock_flag_offset").ok().map(|o| o as u64)),
+                .zip(int(&t, "oem.unlock_flag_offset").ok()),
             known_good,
         })
     }
@@ -131,7 +132,7 @@ mod tests {
         assert_eq!((p.edl_vid, p.edl_pid, p.luns, p.sector_size), (0x05c6, 0x9008, 6, 4096));
         assert_eq!(p.memory, "ufs");
         assert_eq!(p.protected, ["modemst1", "modemst2", "fsg", "fsc", "persist"]);
-        assert_eq!(p.unlock_flag, Some(("config".into(), 4095)));
+        assert_eq!(p.unlock_flag, Some(("config".into(), -1)));
         assert_eq!(p.known_good.len(), 17);
         assert!(
             p.known_good
