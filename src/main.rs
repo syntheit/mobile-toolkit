@@ -3,10 +3,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use mobile_toolkit::firehose::{Firehose, storage_summary};
 use mobile_toolkit::gpt::{self, Ab, Entry, LunGpt, OP_INACTIVE_TYPE};
 use mobile_toolkit::image::{Image, hex};
+use mobile_toolkit::ops::Ops;
 use mobile_toolkit::profile::{Profile, chown_to_user, data_dir};
 use mobile_toolkit::usb::{self, Mode, Usb};
 use mobile_toolkit::write::{self, Opts, Region, size};
-use mobile_toolkit::{devinfo, eprint, eprintln, println, sahara, slot};
+use mobile_toolkit::{devinfo, eprint, eprintln, println, restore, sahara, slot};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -86,6 +87,16 @@ enum Cmd {
         /// Default: the current boot slot
         #[arg(long)]
         slot: Option<SlotArg>,
+        #[command(flatten)]
+        w: WriteFlags,
+    },
+    /// Write a OnePlus .ops package's stock firmware to slot a and select slot a
+    /// (not the GPT, protected partitions or this phone's identity/unlock data)
+    RestoreStock {
+        ops: PathBuf,
+        /// Also write this normally skipped partition (repeatable)
+        #[arg(long, value_name = "PART")]
+        include: Vec<String>,
         #[command(flatten)]
         w: WriteFlags,
     },
@@ -202,6 +213,10 @@ fn run(cli: &Cli, p: &Profile) -> Result<ExitCode> {
         }
         Cmd::InstallNixos { dir, slot, w } => {
             install_nixos(p, cli.loader.as_deref(), dir, slot.map(SlotArg::c), (*w).into())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::RestoreStock { ops, include, w } => {
+            restore_stock(p, cli.loader.as_deref(), ops, include, (*w).into())?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Ops { file, extract, list } => Ok(match mobile_toolkit::ops::cli(file, extract.as_deref(), *list)? {
@@ -785,6 +800,38 @@ fn install_nixos(p: &Profile, loader: Option<&Path>, dir: &Path, slot: Option<ch
             println!("           mtk slot {s} --yes");
         }
         println!("           mtk reset");
+    }
+    Ok(())
+}
+
+fn restore_stock(p: &Profile, loader: Option<&Path>, path: &Path, include: &[String], o: Opts) -> Result<()> {
+    let ops = Ops::open(path)?;
+    let s = &ops.settings;
+    println!(
+        "ops      {}  project {}  {} {}",
+        ops.firmware, s.project, s.target, s.memory
+    );
+    ensure!(
+        s.memory.eq_ignore_ascii_case(&p.memory),
+        "package is for {} storage, the device profile says {}",
+        s.memory,
+        p.memory
+    );
+    let pkg = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let items = restore::select(s, &pkg, &p.protected, include)?;
+    for i in &items {
+        if let restore::Action::Skip(why) = &i.action {
+            println!("skip     LUN{} {:<18} {why}", i.prog.lun, i.prog.label);
+        }
+    }
+    let mut fh = connect(p, loader)?;
+    let parts = parts_of(&all_gpts(&mut fh, p)?);
+    let writes = restore::writes(items, &parts, p.sector_size)?;
+    ensure!(!writes.is_empty(), "nothing in the package to write");
+    let wrote = write::run(&mut fh, &p.protected, &writes, o, &backups())?;
+    set_slot(&mut fh, p, 'a', true, o)?;
+    if wrote {
+        println!("next     stock firmware on slot _a; `mtk reset` to boot it");
     }
     Ok(())
 }

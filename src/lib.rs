@@ -38,6 +38,7 @@ pub mod gpt;
 pub mod image;
 pub mod ops;
 pub mod profile;
+pub mod restore;
 pub mod sahara;
 pub mod slot;
 pub mod usb;

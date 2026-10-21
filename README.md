@@ -22,6 +22,7 @@ mtk flash <partition> <image> [--lun N]   # raw or Android sparse image
 mtk slot a|b [--no-bootlun]               # set the active A/B slot and UFS boot LUN
 mtk unlock [--relock]                     # devinfo + config unlock bytes
 mtk install-nixos <dir> [--slot a|b]      # mobile-nixos fastboot images
+mtk restore-stock <file.ops>              # stock firmware back to slot a
 
 mtk ops <file.ops> [--list] [--extract <dir>]   # OnePlus firmware package, no device
 ```
@@ -129,6 +130,34 @@ mobile-nixos, which holds `boot.img` and `system.img` (sparse on sdm845).
 `boot.img` goes to `boot_<slot>`, where the slot defaults to the current boot
 slot. `system.img` goes to `userdata`. Afterwards mtk prints the next steps
 (`mtk slot <s> --yes` if the slot changed, then `mtk reset`).
+
+### `mtk restore-stock <file.ops>`
+
+This writes the stock firmware from a OnePlus MsmDownloadTool package (the
+global `fajita_41_J.50_210121` for fajita) back to slot a, like an MSM restore
+but without wiping the phone's own data. Each image streams straight out of
+the `.ops`; nothing is extracted. Before it opens USB, mtk decrypts
+`settings.xml`, opens every image and checks the SHA-256 that settings.xml
+gives for each non-sparse one.
+
+- **Written:** every `<program>` entry with an image for slot `_a`, and every
+  entry without a slot. Erase entries (`misc`) are written as zeros.
+- **Skipped:** `_b` entries. `PrimaryGPT`/`BackupGPT`, because the live layout
+  already matches and the factory `gpt_main0` has a 0-length userdata that
+  only the package's `<patch>` fix-ups resize. The profile's protected
+  partitions. `param`, `config`, `oem_dycnvbk`, `oem_stanvbk` and `devinfo`,
+  which hold this phone's identity, unlock state and NV data.
+- `--include <part>` (repeatable) writes a skipped partition anyway. A
+  protected one also needs `--force-protected`. The GPT entries cannot be
+  included.
+- Each entry must be on the same LUN under the same name in the live GPT and
+  start at the sector the package gives. Otherwise mtk refuses, because the
+  layouts differ.
+- Then it runs `mtk slot a` (GPT attributes and boot LUN 1).
+
+The dry run lists every skip with its reason, every write, and the slot
+changes. Writes go through the safety layer above, so a run backs up every
+target first (userdata head and tail only).
 
 ## Loader
 

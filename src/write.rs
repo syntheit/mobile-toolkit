@@ -280,7 +280,7 @@ fn utc_stamp(secs: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -290,11 +290,11 @@ mod tests {
     /// A firehose loader in miniature: answers read/program/nop against
     /// in-memory LUNs, accepting ZLPs, optionally corrupting what it stores.
     #[derive(Default)]
-    struct Fake {
-        luns: Vec<Vec<u8>>,
+    pub(crate) struct Fake {
+        pub(crate) luns: Vec<Vec<u8>>,
         out: VecDeque<Vec<u8>>,
         rx: Option<(usize, usize, usize, Vec<u8>)>,
-        programs: usize,
+        pub(crate) programs: usize,
         corrupt: bool,
         nak_program: bool,
     }
@@ -362,7 +362,7 @@ mod tests {
         }
     }
 
-    fn fake(luns: Vec<Vec<u8>>) -> Firehose<Fake> {
+    pub(crate) fn fake(luns: Vec<Vec<u8>>) -> Firehose<Fake> {
         Firehose::new(
             Fake {
                 luns,
@@ -382,13 +382,13 @@ mod tests {
         }
     }
 
-    fn tmp(name: &str) -> PathBuf {
+    pub(crate) fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mtk-write-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
 
-    fn yes() -> Opts {
+    pub(crate) fn yes() -> Opts {
         Opts {
             yes: true,
             ..Default::default()

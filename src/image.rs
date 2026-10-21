@@ -86,34 +86,34 @@ impl Image {
     /// Open a raw or sparse image file (detected by magic). Hashes the file.
     pub fn open(path: &Path) -> Result<Image> {
         let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let flen = f.metadata()?.len();
+        let len = f.metadata()?.len();
+        Image::slice(f, &path.display().to_string(), 0, len)
+    }
+
+    /// The `len` bytes at `base` in `f` as a raw or sparse image, e.g. one
+    /// image stored inside an .ops package. Hashes the slice.
+    pub fn slice(f: File, label: &str, base: u64, len: u64) -> Result<Image> {
         let mut h = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
-        let mut r = &f;
-        loop {
-            let n = r.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
+        let mut done = 0;
+        while done < len {
+            let n = (len - done).min(buf.len() as u64) as usize;
+            f.read_exact_at(&mut buf[..n], base + done)
+                .with_context(|| format!("reading {label}"))?;
             h.update(&buf[..n]);
+            done += n as u64;
         }
         let mut magic = [0u8; 4];
-        let sparse = flen >= 28 && f.read_exact_at(&mut magic, 0).is_ok() && u32::from_le_bytes(magic) == SPARSE_MAGIC;
+        let sparse =
+            len >= 28 && f.read_exact_at(&mut magic, base).is_ok() && u32::from_le_bytes(magic) == SPARSE_MAGIC;
         let (extents, size) = if sparse {
-            parse_sparse(&f, flen).with_context(|| format!("{}: bad sparse image", path.display()))?
+            parse_sparse(&f, base, len).with_context(|| format!("{label}: bad sparse image"))?
         } else {
-            let pieces = vec![Piece::File { off: 0, len: flen }];
-            (
-                vec![Extent {
-                    offset: 0,
-                    len: flen,
-                    pieces,
-                }],
-                flen,
-            )
+            let pieces = vec![Piece::File { off: base, len }];
+            (vec![Extent { offset: 0, len, pieces }], len)
         };
         Ok(Image {
-            label: path.display().to_string(),
+            label: label.into(),
             file: Some(f),
             mem: vec![],
             extents,
@@ -121,6 +121,29 @@ impl Image {
             sparse,
             sha256: hex(&h.finalize()),
         })
+    }
+
+    /// `len` zero bytes (an erase), generated while streaming.
+    pub fn zeros(label: &str, len: u64) -> Image {
+        let (mut h, z, mut left) = (Sha256::new(), vec![0u8; 1 << 20], len);
+        while left > 0 {
+            let n = left.min(z.len() as u64);
+            h.update(&z[..n as usize]);
+            left -= n;
+        }
+        Image {
+            label: label.into(),
+            file: None,
+            mem: vec![],
+            extents: vec![Extent {
+                offset: 0,
+                len,
+                pieces: vec![Piece::Fill { word: [0; 4], len }],
+            }],
+            size: len,
+            sparse: false,
+            sha256: hex(&h.finalize()),
+        }
     }
 
     /// Bytes actually written (DONT_CARE excluded).
@@ -138,9 +161,10 @@ impl Image {
     }
 }
 
-fn parse_sparse(f: &File, flen: u64) -> Result<(Vec<Extent>, u64)> {
+/// Parse the sparse image of `flen` bytes at `base` in `f`.
+fn parse_sparse(f: &File, base: u64, flen: u64) -> Result<(Vec<Extent>, u64)> {
     let mut h = [0u8; 28];
-    f.read_exact_at(&mut h, 0)?;
+    f.read_exact_at(&mut h, base)?;
     let (major, fhdr, chdr) = (le16(&h, 4), le16(&h, 8) as u64, le16(&h, 10) as u64);
     let (blk, total_blks, chunks) = (le32(&h, 12) as u64, le32(&h, 16) as u64, le32(&h, 20));
     ensure!(major == 1, "unsupported sparse version {major}");
@@ -151,7 +175,7 @@ fn parse_sparse(f: &File, flen: u64) -> Result<(Vec<Extent>, u64)> {
     let (mut pos, mut at) = (fhdr, 0u64);
     for i in 0..chunks {
         let mut c = [0u8; 12];
-        f.read_exact_at(&mut c, pos)
+        f.read_exact_at(&mut c, base + pos)
             .with_context(|| format!("chunk {i} header"))?;
         let (kind, blocks, total) = (le16(&c, 0), le32(&c, 4) as u64, le32(&c, 8) as u64);
         ensure!(total >= chdr && pos + total <= flen, "chunk {i} overruns the file");
@@ -160,14 +184,14 @@ fn parse_sparse(f: &File, flen: u64) -> Result<(Vec<Extent>, u64)> {
             RAW => {
                 ensure!(data_len == out, "chunk {i}: RAW size {data_len} != {out}");
                 Some(Piece::File {
-                    off: data_off,
+                    off: base + data_off,
                     len: out,
                 })
             }
             FILL => {
                 ensure!(data_len == 4, "chunk {i}: FILL data size {data_len}");
                 let mut word = [0u8; 4];
-                f.read_exact_at(&mut word, data_off)?;
+                f.read_exact_at(&mut word, base + data_off)?;
                 Some(Piece::Fill { word, len: out })
             }
             DONT_CARE => None,
@@ -331,6 +355,26 @@ pub(crate) mod tests {
         let e = Image::open(&p).err().unwrap();
         std::fs::remove_file(&p).unwrap();
         assert!(format!("{e:#}").contains("overruns"), "{e:#}");
+    }
+
+    #[test]
+    fn slices_of_a_package() {
+        let (s, x, _) = sparse_fixture();
+        let raw = vec![9u8; 5000];
+        let pkg = [vec![1u8; 512], s.clone(), raw.clone(), vec![2u8; 100]].concat();
+        let p = write_tmp("pkg.bin", &pkg);
+        let f = || File::open(&p).unwrap();
+        let sp = Image::slice(f(), "boot.img", 512, s.len() as u64).unwrap();
+        let r = Image::slice(f(), "abl.elf", 512 + s.len() as u64, 5000).unwrap();
+        assert!(Image::slice(f(), "past.img", pkg.len() as u64 - 10, 20).is_err());
+        std::fs::remove_file(&p).unwrap();
+        assert!(sp.sparse && sp.size == 9 * 4096 && sp.sha256 == hex(&Sha256::digest(&s)));
+        assert_eq!(expand(&sp, &sp.extents[1]), x[6 * 4096..]);
+        assert!(!r.sparse && r.sha256 == hex(&Sha256::digest(&raw)));
+        assert_eq!(expand(&r, &r.extents[0]), raw);
+        let z = Image::zeros("misc", 10000);
+        assert_eq!(z.sha256, hex(&Sha256::digest(vec![0u8; 10000])));
+        assert_eq!(expand(&z, &z.extents[0]), vec![0u8; 10000]);
     }
 
     #[test]
