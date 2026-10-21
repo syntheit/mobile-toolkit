@@ -8,3 +8,4 @@ pub mod profile;
 pub mod sahara;
 pub mod slot;
 pub mod usb;
+pub mod write;

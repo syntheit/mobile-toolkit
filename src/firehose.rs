@@ -65,7 +65,7 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 pub struct Firehose<T: Transport> {
-    t: T,
+    pub(crate) t: T,
     /// Bytes received but not yet consumed (partial XML or early raw data).
     pending: Vec<u8>,
     pub sector_size: usize,

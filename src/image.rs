@@ -52,7 +52,7 @@ pub struct Image {
     pub sha256: String,
 }
 
-fn hex(b: &[u8]) -> String {
+pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
